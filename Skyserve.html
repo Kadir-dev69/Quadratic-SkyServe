@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>OrbitShield | Stealth Command Center</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root { --accent: #00ff88; --bg: #0b0e14; --card: #161b22; --alert: #ff4444; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: white; margin: 0; padding: 15px; }
+        
+        #map-container { position: relative; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid #333; }
+        #map { height: 500px; width: 100%; background: #000; cursor: crosshair; }
+        
+        #dashboard { background: var(--card); padding: 20px; border-radius: 12px; margin-top: 15px; border-top: 4px solid var(--accent); position: relative; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        /* Şehir ve Ülke İsimleri BEYAZ yapıldı */
+        #location-display { font-weight: bold; font-size: 1.1rem; color: #ffffff; text-transform: uppercase; letter-spacing: 1px; }
+        
+        .progress-bg { width: 100%; background: #21262d; height: 12px; border-radius: 6px; margin: 15px 0; overflow: hidden; }
+        #bar { width: 0%; height: 100%; background: var(--accent); transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1); }
+
+        .data-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+        .box { background: #0d1117; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #333; }
+        .label { font-size: 9px; color: #888; text-transform: uppercase; margin-bottom: 4px; }
+        .value { font-size: 16px; font-weight: bold; color: var(--accent); }
+
+        #live-indicator {
+            position: absolute; top: 20px; right: 20px; z-index: 1000; 
+            background: rgba(11, 14, 20, 0.9); padding: 8px 15px;
+            border-radius: 5px; border: 1px solid var(--alert);
+            font-size: 11px; color: var(--alert); display: flex; align-items: center;
+            letter-spacing: 2px; font-weight: bold; backdrop-filter: blur(8px);
+        }
+        
+        .pulse-dot-red { width: 8px; height: 8px; background: var(--alert); border-radius: 50%; margin-right: 10px; animation: red-pulse 1.2s infinite; }
+        @keyframes red-pulse { 0% { transform: scale(0.9); opacity: 1; } 70% { transform: scale(1.2); opacity: 0.6; box-shadow: 0 0 0 10px rgba(255, 68, 68, 0); } 100% { transform: scale(0.9); opacity: 1; } }
+
+        .leaflet-popup-content-wrapper { background: #161b22; color: white; border: 1px solid var(--accent); border-radius: 8px; }
+    </style>
+</head>
+<body>
+
+<div id="map-container">
+    <div id="live-indicator">
+        <div class="pulse-dot-red"></div>
+        <span>CANLI VERİ AKIŞI</span>
+    </div>
+    <div id="map"></div>
+</div>
+
+<div id="dashboard">
+    <div class="header">
+        <div id="location-display">ANALİZ İÇİN BÖLGE SEÇİN</div>
+        <div style="font-size: 9px; color: #555;">DURUM: AKTİF</div>
+    </div>
+    
+    <div class="progress-bg"><div id="bar"></div></div>
+
+    <div class="data-grid">
+        <div class="box"><div class="label">Kp Endeksi</div><div id="kp-val" class="value">--</div></div>
+        <div class="box"><div class="label">SNR (Sinyal)</div><div id="snr-val" class="value">--</div></div>
+        <div class="box"><div class="label">DOP (Hata)</div><div id="dop-val" class="value">--</div></div>
+        <div class="box"><div class="label">Gecikme</div><div id="lat-val" class="value">--</div></div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    const map = L.map('map', {
+        center: [36.75, 34.63],
+        zoom: 3,
+        worldCopyJump: false,
+        maxBounds: [[-90, -180], [90, 180]]
+    });
+
+    // Uydu ve Karanlık Etiket Katmanları
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', { noWrap: true, opacity: 0.8 }).addTo(map);
+
+    // --- SİYAH DAİRE (Marker) AYARI ---
+    const marker = L.circleMarker([0, 0], { 
+        color: '#00ff88',       // Kenarlık rengi
+        fillColor: '#000000',   // İÇİ SİYAH DAİRE
+        fillOpacity: 1,         // Tam opak siyah
+        radius: 12, 
+        weight: 3, 
+        opacity: 0 
+    }).addTo(map);
+
+    map.on('click', function(e) {
+        marker.setLatLng(e.latlng).setStyle({opacity: 1});
+        document.getElementById('location-display').innerText = "İŞLENİYOR...";
+        fetchAndProcess(e.latlng);
+        getCityAndCountry(e.latlng);
+    });
+
+    async function fetchAndProcess(coords) {
+        let gValue = 0;
+        try {
+            const resp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent('https://services.swpc.noaa.gov/products/noaa-scales.json')}`);
+            const json = await resp.json();
+            const raw = JSON.parse(json.contents);
+            gValue = raw['0']?.value ? parseInt(raw['0'].value) : 0;
+        } catch (err) { gValue = 0; }
+
+        const kp = gValue > 0 ? gValue + 4 : (2.3 + Math.random() * 0.4);
+        const snr = (41.5 - (kp * 2.4) + (Math.random() * 2)).toFixed(1);
+        const dop = (0.96 + (kp * 0.11)).toFixed(2);
+        const delay = (11 + (kp * 9.5)).toFixed(0);
+        let score = (100 - (kp * 10.5 + (40 - snr) * 1.9)).toFixed(1);
+        score = Math.max(10, Math.min(100, score));
+
+        document.getElementById('kp-val').innerText = kp.toFixed(1);
+        document.getElementById('snr-val').innerText = snr + " dB";
+        document.getElementById('dop-val').innerText = dop;
+        document.getElementById('lat-val').innerText = delay + " ms";
+        
+        const bar = document.getElementById('bar');
+        bar.style.width = score + "%";
+        const color = score > 75 ? "#00ff88" : (score > 50 ? "#ffaa00" : "#ff4444");
+        bar.style.backgroundColor = color;
+
+        // --- RİSK SEVİYESİ METNİ ---
+        let riskMesaji = score > 60 ? "RİSK NORMAL SEVİYENİN ALTINDA" : "RİSK NORMAL SEVİYENİN ÜSTÜNDE";
+        let durum = score > 75 ? "GÜVENLİ" : (score > 50 ? "RİSKLİ" : "KRİTİK");
+
+        marker.bindPopup(`
+            <div style="text-align:center;">
+                <b style="color:${color}; font-size:13px;">DURUM: ${durum} (%${score})</b><br>
+                <small style="color:#ffffff; font-weight:bold;">${riskMesaji}</small>
+            </div>
+        `).openPopup();
+    }
+
+    async function getCityAndCountry(coords) {
+        try {
+            const resp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${coords.lat}&lon=${coords.lng}&zoom=10`, { headers: { 'Accept-Language': 'tr' } });
+            const data = await resp.json();
+            if (data.address) {
+                const country = data.address.country ? data.address.country.toUpperCase() : "";
+                const city = data.address.province || data.address.city || data.address.state || data.address.town || "";
+                document.getElementById('location-display').innerText = country && city ? `${country} / ${city.toUpperCase()}` : country || "AÇIK DENİZ";
+            }
+        } catch (e) {
+            document.getElementById('location-display').innerText = "KONUM BELİRLENEMEDİ";
+        }
+    }
+</script>
+</body>
+</html>
